@@ -14,6 +14,7 @@ import asyncio
 from spade.agent import Agent
 from spade.behaviour import CyclicBehaviour, OneShotBehaviour
 from spade.message import Message
+from ast import literal_eval # To safely convert string "(3,4)" to tuple
 
 # Pour éviter les warning logs
 import logging
@@ -31,11 +32,6 @@ logging.getLogger("asyncio").setLevel(logging.CRITICAL)
 class LivreurAgent(Agent):
     """
     Agent livreur qui répond aux appels d'offres.
-    
-    Attributs:
-        tarif: prix par km
-        position: tuple (x, y)
-        disponible: True/False
     """
     
     def __init__(self, jid, password, tarif, position, disponible=True):
@@ -57,27 +53,45 @@ class LivreurAgent(Agent):
                 performative = msg.get_metadata("performative")
                 
                 if performative == "cfp":
-                    # TODO: Extraire la destination du msg.body
-                    # Format: "livraison:(3,4)" → destination = (3, 4)
-                    
-                    # TODO: Si disponible:
-                    #   - Calculer le coût (distance * tarif)
-                    #   - Envoyer un message "propose" avec body = f"cout:{cout}"
-                    # Sinon:
-                    #   - Envoyer un message "refuse"
-                    
-                    pass  # Remplacer par votre code
+                    # Extraire la destination du msg.body "livraison:(3,4)"
+                    try:
+                        content = msg.body.split(":") # ["livraison", "(3,4)"]
+                        destination = literal_eval(content[1]) # Convert string "(3,4)" to tuple
+                        
+                        print(f"  🤔 {self.agent.jid} a reçu un appel d'offre pour {destination}")
+
+                        if self.agent.disponible:
+                            # Calculer le coût (distance * tarif)
+                            dist = self.agent.calculer_distance(destination)
+                            cout = dist * self.agent.tarif
+                            
+                            # Envoyer un message "propose"
+                            reply = msg.make_reply()
+                            reply.set_metadata("performative", "propose")
+                            reply.body = f"cout:{cout}"
+                            await self.send(reply)
+                            print(f"  Types: ➡️ {self.agent.jid} propose un coût de {cout}")
+                        else:
+                            # Envoyer un message "refuse"
+                            reply = msg.make_reply()
+                            reply.set_metadata("performative", "refuse")
+                            reply.body = "Indisponible"
+                            await self.send(reply)
+                            print(f"  ⛔ {self.agent.jid} refuse (indisponible)")
+                            
+                    except Exception as e:
+                        print(f"Erreur de lecture du message: {e}")
                 
                 elif performative == "accept-proposal":
-                    # TODO: Afficher "Livraison acceptée!"
-                    # TODO: Envoyer un message "inform" avec body = "done"
-                    
-                    pass  # Remplacer par votre code
+                    print(f"  🎉 {self.agent.jid}: Livraison acceptée! J'y vais.")
+                    # Envoyer un message "inform" avec body = "done"
+                    reply = msg.make_reply()
+                    reply.set_metadata("performative", "inform")
+                    reply.body = "done"
+                    await self.send(reply)
                 
                 elif performative == "reject-proposal":
-                    # TODO: Afficher "Offre refusée"
-                    
-                    pass  # Remplacer par votre code
+                    print(f"  😞 {self.agent.jid}: Offre refusée.")
     
     async def setup(self):
         print(f"🚚 {self.jid} démarré (tarif={self.tarif}, position={self.position})")
@@ -97,6 +111,7 @@ class GestionnaireAgent(Agent):
         super().__init__(jid, password)
         self.livreurs_jids = livreurs_jids  # Liste des JIDs des livreurs
         self.propositions = []
+        self.destination = None
     
     class LancerAppelOffres(OneShotBehaviour):
         """Comportement pour lancer un appel d'offres."""
@@ -108,14 +123,14 @@ class GestionnaireAgent(Agent):
             destination = self.agent.destination
             print(f"\n📢 Lancement appel d'offres pour livraison à {destination}")
             
-            # TODO: Pour chaque livreur dans self.agent.livreurs_jids:
-            #   - Créer un message avec performative = "cfp"
-            #   - body = f"livraison:{destination}"
-            #   - Envoyer le message
+            # Pour chaque livreur, envoyer un CFP
+            for livreur_jid in self.agent.livreurs_jids:
+                msg = Message(to=livreur_jid)
+                msg.set_metadata("performative", "cfp")
+                msg.body = f"livraison:{destination}"
+                await self.send(msg)
             
-            pass  # Remplacer par votre code
-            
-            # Attendre les réponses
+            # Attendre les réponses (le CyclicBehaviour CollecterPropositions s'en charge)
             await asyncio.sleep(2)
     
     class CollecterPropositions(CyclicBehaviour):
@@ -125,41 +140,57 @@ class GestionnaireAgent(Agent):
             msg = await self.receive(timeout=3)
             if msg:
                 performative = msg.get_metadata("performative")
+                sender = str(msg.sender)
                 
                 if performative == "propose":
-                    # TODO: Extraire le coût du msg.body (format: "cout:XX")
-                    # TODO: Ajouter à self.agent.propositions:
-                    #       {'livreur': str(msg.sender), 'cout': cout}
-                    # TODO: Afficher la proposition
-                    
-                    pass  # Remplacer par votre code
+                    # Extraire le coût du msg.body (format: "cout:XX")
+                    try:
+                        cout_str = msg.body.split(":")[1]
+                        cout = float(cout_str)
+                        
+                        # Ajouter à self.agent.propositions
+                        self.agent.propositions.append({'livreur': sender, 'cout': cout})
+                        print(f"  📥 Proposition reçue de {sender}: {cout}")
+                    except ValueError:
+                        print(f"Erreur format cout de {sender}")
                 
                 elif performative == "refuse":
-                    print(f"  ❌ {msg.sender} a refusé")
+                    print(f"  ❌ {sender} a refusé")
                 
                 elif performative == "inform":
                     if msg.body == "done":
-                        print(f"  ✅ Livraison confirmée par {msg.sender}")
+                        print(f"  ✅ CONFIRMATION: Livraison terminée par {sender}")
     
     class SelectionnerMeilleur(OneShotBehaviour):
         """Comportement pour sélectionner la meilleure offre."""
         
         async def run(self):
-            await asyncio.sleep(3)  # Attendre les propositions
+            await asyncio.sleep(3)  # Attendre que les propositions arrivent
             
             print(f"\n🔍 Évaluation des {len(self.agent.propositions)} propositions...")
             
             if not self.agent.propositions:
-                print("  Aucune proposition reçue!")
+                print("  Aucune proposition reçue! Abandon de la mission.")
                 return
             
-            # TODO: Trouver la proposition avec le coût minimum
-            # TODO: Pour chaque proposition:
-            #   - Si c'est le gagnant: envoyer "accept-proposal"
-            #   - Sinon: envoyer "reject-proposal"
-            # TODO: Afficher le gagnant
+            # Trouver la proposition avec le coût minimum
+            meilleure_offre = min(self.agent.propositions, key=lambda x: x['cout'])
+            gagnant_jid = meilleure_offre['livreur']
+            print(f"  ⭐ Le gagnant est {gagnant_jid} avec un coût de {meilleure_offre['cout']}")
             
-            pass  # Remplacer par votre code
+            # Répondre à tous les livreurs
+            for prop in self.agent.propositions:
+                livreur = prop['livreur']
+                msg = Message(to=livreur)
+                
+                if livreur == gagnant_jid:
+                    msg.set_metadata("performative", "accept-proposal")
+                    msg.body = "Tu as le job"
+                else:
+                    msg.set_metadata("performative", "reject-proposal")
+                    msg.body = "Trop cher"
+                
+                await self.send(msg)
     
     async def setup(self):
         print(f"📋 {self.jid} démarré")
@@ -182,30 +213,42 @@ async def main():
     print("🚚 SIMULATION SYSTÈME DE LIVRAISON SPADE")
     print("=" * 60)
     
-    # TODO: Créer 3 agents livreurs avec les JIDs:
-    #   - "livreur_a@localhost" (tarif=2.0, position=(0,0), disponible=True)
-    #   - "livreur_b@localhost" (tarif=1.5, position=(5,5), disponible=True)
-    #   - "livreur_c@localhost" (tarif=1.0, position=(10,0), disponible=False)
-    # Password: "password" pour tous
+    # Création des 3 agents livreurs selon l'énoncé
+    livreur_a = LivreurAgent("livreur_a@localhost", "password", tarif=2.0, position=(0,0), disponible=True)
+    livreur_b = LivreurAgent("livreur_b@localhost", "password", tarif=1.5, position=(5,5), disponible=True)
+    livreur_c = LivreurAgent("livreur_c@localhost", "password", tarif=1.0, position=(10,0), disponible=False)
     
-    # TODO: Créer l'agent gestionnaire avec JID "gestionnaire@localhost"
-    # Passer la liste des JIDs des livreurs
+    livreurs = [livreur_a, livreur_b, livreur_c]
     
-    # TODO: Démarrer tous les agents avec await agent.start()
+    # Création du gestionnaire
+    gestionnaire = GestionnaireAgent("gestionnaire@localhost", "password", ["livreur_a@localhost", "livreur_b@localhost", "livreur_c@localhost"])
     
-    # TODO: Attendre un peu puis lancer une livraison vers (3, 4)
-    # gestionnaire.lancer_livraison((3, 4))
+    # Démarrage des agents
+    await livreur_a.start()
+    await livreur_b.start()
+    await livreur_c.start()
+    await gestionnaire.start()
     
-    # TODO: Attendre la fin (await asyncio.sleep(10))
+    # Attendre que les agents soient prêts
+    await asyncio.sleep(2)
     
-    # TODO: Arrêter tous les agents avec await agent.stop()
+    # Lancer une livraison vers (3, 4)
+    gestionnaire.lancer_livraison((3, 4))
     
-    pass  # Remplacer par votre code
+    # Attendre la fin de la simulation
+    print("\n⏳ Simulation en cours (10s)...")
+    await asyncio.sleep(10)
+    
+    # Arrêt des agents
+    print("\n🛑 Arrêt des agents...")
+    await livreur_a.stop()
+    await livreur_b.stop()
+    await livreur_c.stop()
+    await gestionnaire.stop()
     
     print("\n" + "=" * 60)
     print("✅ SIMULATION TERMINÉE")
     print("=" * 60)
-
 
 if __name__ == "__main__":
     # embedded_xmpp_server=True lance automatiquement le serveur XMPP
